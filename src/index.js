@@ -36,6 +36,9 @@ const server = new Server(
 let headlessBrowser = null;
 let headedBrowser = null;
 
+// Store persistent sessions
+const persistentSessions = new Map(); // sessionId -> { browser, context, page }
+
 async function getBrowser(headless = true) {
   // Use separate browser instances for headless and headed modes
   if (headless) {
@@ -57,6 +60,40 @@ async function getBrowser(headless = true) {
     }
     return headedBrowser;
   }
+}
+
+// Generate a unique session ID
+function generateSessionId() {
+  return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Get or create a session
+async function getOrCreateSession(sessionId, headless = true) {
+  if (sessionId && persistentSessions.has(sessionId)) {
+    return persistentSessions.get(sessionId);
+  }
+  
+  // Create new session if not exists
+  const browser = await chromium.launch({
+    headless: headless,
+    slowMo: headless ? 0 : (parseInt(process.env.SLOW_MO) || 0),
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+    userAgent: 'Mozilla/5.0 (Playwright MCP Testing)',
+  });
+  
+  const page = await context.newPage();
+  
+  const session = { browser, context, page };
+  
+  if (sessionId) {
+    persistentSessions.set(sessionId, session);
+  }
+  
+  return session;
 }
 
 // Register tool handlers
@@ -89,6 +126,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'boolean',
             description: 'Run browser in headless mode (default: true)',
             default: true,
+          },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
           },
         },
         required: ['url'],
@@ -132,6 +173,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url'],
       },
@@ -160,6 +205,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url', 'formData'],
       },
@@ -186,6 +235,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'boolean',
             description: 'Run browser in headless mode (default: true)',
             default: true,
+          },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
           },
         },
         required: ['url', 'selector'],
@@ -219,6 +272,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'boolean',
             description: 'Run browser in headless mode (default: true)',
             default: true,
+          },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
           },
         },
         required: ['url'],
@@ -257,6 +314,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url', 'selector'],
       },
@@ -288,6 +349,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url', 'selectors'],
       },
@@ -311,6 +376,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'boolean',
             description: 'Run browser in headless mode (default: true)',
             default: true,
+          },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
           },
         },
         required: ['url'],
@@ -345,6 +414,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url'],
       },
@@ -376,8 +449,54 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Run browser in headless mode (default: true)',
             default: true,
           },
+          sessionId: {
+            type: 'string',
+            description: 'Use existing session ID (optional)',
+          },
         },
         required: ['url'],
+      },
+    },
+    {
+      name: 'start_session',
+      description: 'Start a persistent browser session that stays open between tool calls',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: false for sessions)',
+            default: false,
+          },
+          url: {
+            type: 'string',
+            description: 'Initial URL to navigate to (optional)',
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'end_session',
+      description: 'Close a persistent browser session',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID to close',
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'list_sessions',
+      description: 'List all active browser sessions',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        required: [],
       },
     },
   ],
@@ -387,15 +506,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    // Use headless parameter from args, defaulting to true if not specified
-    const headless = args.headless !== false;
-    const browser = await getBrowser(headless);
+    // Handle session management tools first
+    if (name === 'start_session') {
+      const sessionId = generateSessionId();
+      const headless = args.headless !== undefined ? args.headless : false; // Default to visible for sessions
+      const session = await getOrCreateSession(sessionId, headless);
+      
+      if (args.url) {
+        await session.page.goto(args.url, { waitUntil: 'networkidle' });
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Started session: ${sessionId}\nBrowser is ${headless ? 'headless' : 'visible'}\n${args.url ? `Navigated to: ${args.url}` : 'Ready for commands'}\n\nUse this sessionId with other tools to interact with this browser session.`,
+          },
+        ],
+      };
+    }
     
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      userAgent: 'Mozilla/5.0 (Playwright MCP Testing)',
-    });
-    const page = await context.newPage();
+    if (name === 'end_session') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      await session.context.close();
+      await session.browser.close();
+      persistentSessions.delete(args.sessionId);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Closed session: ${args.sessionId}`,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'list_sessions') {
+      const sessions = Array.from(persistentSessions.keys());
+      return {
+        content: [
+          {
+            type: 'text',
+            text: sessions.length > 0 
+              ? `Active sessions:\n${sessions.join('\n')}`
+              : 'No active sessions',
+          },
+        ],
+      };
+    }
+    
+    // For other tools, check if sessionId is provided
+    let browser, context, page;
+    let shouldCloseContext = true; // Flag to determine if we should close context after operation
+    
+    if (args.sessionId && persistentSessions.has(args.sessionId)) {
+      // Use existing session
+      const session = persistentSessions.get(args.sessionId);
+      browser = session.browser;
+      context = session.context;
+      page = session.page;
+      shouldCloseContext = false; // Don't close persistent sessions
+    } else {
+      // Create temporary browser/context/page for this operation
+      const headless = args.headless !== false;
+      browser = await getBrowser(headless);
+      
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 720 },
+        userAgent: 'Mozilla/5.0 (Playwright MCP Testing)',
+      });
+      page = await context.newPage();
+    }
 
     switch (name) {
       case 'screenshot': {
@@ -417,7 +610,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await page.screenshot(screenshotOptions);
         }
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -463,7 +656,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const url = page.url();
         const title = await page.title();
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -495,7 +688,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           path: join(SCREENSHOTS_DIR, `form-${timestamp}.png`) 
         });
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -514,7 +707,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const exists = await element.count() > 0;
         
         if (!exists) {
-          await context.close();
+          if (shouldCloseContext) await context.close();
           return {
             content: [
               {
@@ -535,7 +728,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           result += `\nExpected text match: ${matches}`;
         }
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -559,7 +752,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const title = await page.title();
         const url = page.url();
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -587,7 +780,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         const newUrl = page.url();
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -617,7 +810,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -656,7 +849,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }),
         };
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -682,7 +875,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           printBackground: true,
         });
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -719,7 +912,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         await page.goto(args.url, { waitUntil: 'networkidle' });
         
-        await context.close();
+        if (shouldCloseContext) await context.close();
         
         return {
           content: [
@@ -749,6 +942,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Cleanup on shutdown
 process.on('SIGINT', async () => {
+  // Close all persistent sessions
+  for (const [sessionId, session] of persistentSessions) {
+    try {
+      await session.context.close();
+      await session.browser.close();
+    } catch (e) {
+      // Ignore errors during cleanup
+    }
+  }
+  persistentSessions.clear();
+  
   if (headlessBrowser) {
     await headlessBrowser.close();
   }

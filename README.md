@@ -17,6 +17,14 @@ A Model Context Protocol (MCP) server that provides Playwright browser automatio
 - **generate_pdf** - Convert webpages to PDF documents
 - **monitor_network** - Monitor and capture network requests
 
+### Session Management Tools (NEW!)
+
+- **start_session** - Start a persistent browser session that stays open
+- **end_session** - Close a specific browser session
+- **list_sessions** - List all active browser sessions
+
+All tools now support both one-off operations and persistent sessions!
+
 ## Installation
 
 ### Prerequisites
@@ -86,6 +94,8 @@ That's it! The server will automatically start when Claude Code needs it.
 
 #### Usage Examples in Claude Code
 
+##### One-off Operations
+
 - **Headless mode (default - fast, no UI):**
   ```
   "Use playwright to screenshot https://example.com"
@@ -95,6 +105,35 @@ That's it! The server will automatically start when Claude Code needs it.
   ```
   "Use playwright to screenshot https://example.com with headless=false"
   ```
+
+##### Persistent Browser Sessions (NEW!)
+
+Keep a browser open for multiple operations - perfect for debugging and interactive testing:
+
+1. **Start a session (browser stays open):**
+   ```
+   "Start a playwright session and navigate to https://example.com"
+   ```
+   Response will include a sessionId like: `session-1234567890-abc123`
+
+2. **Use the session for multiple operations:**
+   ```
+   "Use playwright session-1234567890-abc123 to click the login button"
+   "Use playwright session-1234567890-abc123 to fill the form with test data"
+   "Use playwright session-1234567890-abc123 to take a screenshot"
+   ```
+
+3. **List active sessions:**
+   ```
+   "List all playwright sessions"
+   ```
+
+4. **End a session when done:**
+   ```
+   "End playwright session-1234567890-abc123"
+   ```
+
+The browser window stays open between commands, maintaining state, cookies, and login sessions!
 
 #### Optional: Add Environment Variables
 
@@ -149,7 +188,9 @@ docker-compose up
 
 ### Tool Examples
 
-All tools now support a `headless` parameter (default: `true`). Set to `false` to see the browser in action!
+All tools now support:
+- `headless` parameter (default: `true`) - Set to `false` to see the browser in action
+- `sessionId` parameter (optional) - Use an existing browser session for the operation
 
 #### Take a Screenshot
 ```javascript
@@ -250,6 +291,49 @@ All tools now support a `headless` parameter (default: `true`). Set to `false` t
     "url": "https://example.com",
     "captureTypes": ["xhr", "fetch"],
     "filterPattern": "api.*"
+  }
+}
+```
+
+#### Session Management
+
+##### Start a Persistent Session
+```javascript
+{
+  "tool": "start_session",
+  "arguments": {
+    "headless": false,  // Default false for sessions
+    "url": "https://example.com"  // Optional initial URL
+  }
+}
+// Returns: sessionId to use with other tools
+```
+
+##### Use Session with Other Tools
+```javascript
+{
+  "tool": "screenshot",
+  "arguments": {
+    "url": "https://example.com/page2",
+    "sessionId": "session-1234567890-abc123"  // Use existing session
+  }
+}
+```
+
+##### List Active Sessions
+```javascript
+{
+  "tool": "list_sessions",
+  "arguments": {}
+}
+```
+
+##### End a Session
+```javascript
+{
+  "tool": "end_session",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123"
   }
 }
 ```
