@@ -500,14 +500,16 @@ playwright-mcp-server/
 │   └── index.js          # Main MCP server implementation
 ├── docker/
 │   └── Dockerfile        # Docker container configuration
-├── screenshots/          # Screenshot output directory
 ├── tests/               # Test files
 ├── docker-compose.yml   # Docker Compose configuration
 ├── package.json         # Node.js dependencies
 ├── .env.example        # Environment template
 ├── .gitignore          # Git ignore rules
+├── run-dev.sh          # Development mode script
 └── README.md           # Documentation
 ```
+
+**Note:** Screenshots are saved to `~/.playwright-mcp/screenshots/` in your home directory by default.
 
 ## Development
 
@@ -552,12 +554,6 @@ npx playwright install --with-deps chromium
 docker-compose run --user root playwright-mcp npm install
 ```
 
-### Screenshot Directory Issues
-```bash
-# Create screenshots directory
-mkdir -p screenshots
-chmod 755 screenshots
-```
 
 ## Contributing
 
