@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playwright MCP Test Site</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        
+        h1 {
+            color: #667eea;
+            margin-bottom: 1rem;
+        }
+        
+        .card {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #555;
+        }
+        
+        input, textarea, select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            background: #667eea;
+            color: white;
+            padding: 0.75rem 2rem;
+            border: none;
+            border-radius: 5px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background: #5a67d8;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+        
+        .feature {
+            padding: 1rem;
+            background: #f7f7f7;
+            border-radius: 5px;
+        }
+        
+        .feature h3 {
+            color: #667eea;
+            margin-bottom: 0.5rem;
+        }
+        
+        #message {
+            padding: 1rem;
+            margin-top: 1rem;
+            border-radius: 5px;
+            display: none;
+        }
+        
+        #message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }
+        
+        #message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }
+        
+        .image-gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .image-gallery img {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 5px;
+        }
+        
+        footer {
+            text-align: center;
+            color: white;
+            padding: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Playwright MCP Test Site</h1>
+            <p>A demonstration site for testing Playwright MCP Server tools</p>
+        </header>
+
+        <!-- Login Form -->
+        <div class="card" id="login-section">
+            <h2>Login Form</h2>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="username">Username/Email</label>
+                    <input type="email" id="username" name="username" placeholder="test@example.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter password" required>
+                </div>
+                <button type="submit">Login</button>
+            </form>
+            <div id="login-message"></div>
+        </div>
+
+        <!-- Contact Form -->
+        <div class="card">
+            <h2>Contact Form</h2>
+            <form id="contact-form">
+                <div class="form-group">
+                    <label for="name">Full Name</label>
+                    <input type="text" id="name" name="name" placeholder="John Doe" required>
+                </div>
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" placeholder="john@example.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="subject">Subject</label>
+                    <select id="subject" name="subject">
+                        <option value="general">General Inquiry</option>
+                        <option value="support">Technical Support</option>
+                        <option value="sales">Sales</option>
+                        <option value="feedback">Feedback</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="message">Message</label>
+                    <textarea id="message" name="message" rows="5" placeholder="Your message here..." required></textarea>
+                </div>
+                <button type="submit">Send Message</button>
+            </form>
+            <div id="contact-message"></div>
+        </div>
+
+        <!-- Features Section -->
+        <div class="card">
+            <h2>Features</h2>
+            <div class="grid">
+                <div class="feature">
+                    <h3>Screenshot Testing</h3>
+                    <p>Capture full page or element-specific screenshots for visual regression testing.</p>
+                </div>
+                <div class="feature">
+                    <h3>Form Automation</h3>
+                    <p>Automatically fill and submit forms with predefined data sets.</p>
+                </div>
+                <div class="feature">
+                    <h3>Accessibility Checks</h3>
+                    <p>Run WCAG compliance checks to ensure your site is accessible to all users.</p>
+                </div>
+                <div class="feature">
+                    <h3>Network Monitoring</h3>
+                    <p>Monitor and analyze network requests during page interactions.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Image Gallery (for testing image alt attributes) -->
+        <div class="card">
+            <h2>Image Gallery</h2>
+            <div class="image-gallery">
+                <img src="https://via.placeholder.com/300x200/667eea/ffffff?text=Image+1" alt="Placeholder image 1">
+                <img src="https://via.placeholder.com/300x200/764ba2/ffffff?text=Image+2" alt="Placeholder image 2">
+                <img src="https://via.placeholder.com/300x200/667eea/ffffff?text=Image+3" alt="">
+                <img src="https://via.placeholder.com/300x200/764ba2/ffffff?text=Image+4" alt="Placeholder image 4">
+            </div>
+        </div>
+
+        <footer>
+            <p>&copy; 2024 Playwright MCP Server Test Site</p>
+        </footer>
+    </div>
+
+    <script>
+        // Login form handler
+        document.getElementById('login-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const messageEl = document.getElementById('login-message');
+            
+            // Simple validation
+            if (username === 'test@example.com' && password === 'test123') {
+                messageEl.textContent = 'Login successful! Redirecting...';
+                messageEl.className = 'success';
+                messageEl.style.display = 'block';
+                
+                // Simulate redirect
+                setTimeout(() => {
+                    window.location.hash = '#dashboard';
+                }, 2000);
+            } else {
+                messageEl.textContent = 'Invalid credentials. Try test@example.com / test123';
+                messageEl.className = 'error';
+                messageEl.style.display = 'block';
+            }
+        });
+        
+        // Contact form handler
+        document.getElementById('contact-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const messageEl = document.getElementById('contact-message');
+            
+            // Simulate form submission
+            messageEl.textContent = 'Message sent successfully! We will get back to you soon.';
+            messageEl.className = 'success';
+            messageEl.style.display = 'block';
+            
+            // Reset form after 3 seconds
+            setTimeout(() => {
+                this.reset();
+                messageEl.style.display = 'none';
+            }, 3000);
+        });
+        
+        // Simulate API calls for network monitoring
+        setTimeout(() => {
+            fetch('https://jsonplaceholder.typicode.com/posts/1')
+                .then(response => response.json())
+                .then(data => console.log('API call 1:', data));
+        }, 1000);
+        
+        setTimeout(() => {
+            fetch('https://jsonplaceholder.typicode.com/users/1')
+                .then(response => response.json())
+                .then(data => console.log('API call 2:', data));
+        }, 2000);
+    </script>
+</body>
+</html>

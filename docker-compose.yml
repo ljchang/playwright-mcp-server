@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  playwright-mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: playwright-mcp-server
+    ports:
+      - "3000:3000"  # If you add HTTP interface
+    environment:
+      - NODE_ENV=development
+      - HEADLESS=true
+      - TEST_USER=${TEST_USER}
+      - TEST_PASS=${TEST_PASS}
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
+    volumes:
+      # Mount source code for development
+      - ./src:/app/src
+      - ./tests:/app/tests
+      # Persist screenshots
+      - ./screenshots:/app/screenshots
+      # Mount env file
+      - ./.env:/app/.env
+    stdin_open: true
+    tty: true
+    command: npm run dev
+    networks:
+      - mcp-network
+
+  # Optional: Add a test web app for local testing
+  test-app:
+    image: nginx:alpine
+    container_name: test-web-app
+    ports:
+      - "8080:80"
+    volumes:
+      - ./test-site:/usr/share/nginx/html
+    networks:
+      - mcp-network
+    profiles:
+      - with-test-app
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  screenshots:
+    driver: local

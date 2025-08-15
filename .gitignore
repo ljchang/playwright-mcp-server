@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Test outputs
+screenshots/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Build outputs
+dist/
+build/
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Authentication states
+playwright/.auth/
+auth.json
+
+# Local test data
+test-data/
+*.test.json

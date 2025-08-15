@@ -1,0 +1,37 @@
+{
+  "name": "playwright-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for Playwright testing and screenshot automation",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test tests/",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:down": "docker-compose down"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "playwright": "^1.48.0",
+    "dotenv": "^16.4.5",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "playwright",
+    "testing",
+    "automation",
+    "screenshots"
+  ],
+  "author": "",
+  "license": "MIT"
+}
