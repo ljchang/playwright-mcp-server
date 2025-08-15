@@ -58,21 +58,54 @@ APP_BASE_URL=http://localhost:3000
 
 ## Usage
 
-### Starting the Server
+### Using with Claude Code (Recommended)
 
-#### Standard Mode
+Claude Code automatically manages the MCP server lifecycle - no need to manually start the server!
+
+#### Quick Setup (Global Installation)
+
+1. First, ensure you have the server installed:
 ```bash
-npm start
+git clone https://github.com/ljchang/playwright-mcp-server.git
+cd playwright-mcp-server
+npm install
+npx playwright install chromium
 ```
 
-#### Development Mode (with auto-reload)
+2. Add the server to Claude Code globally (available in all sessions):
 ```bash
-npm run dev
+claude mcp add playwright-mcp "node" "/absolute/path/to/playwright-mcp-server/src/index.js" --scope user
 ```
 
-#### Docker Mode
+3. Verify the server is connected:
 ```bash
-docker-compose up
+claude mcp list
+```
+
+That's it! The server will automatically start when Claude Code needs it.
+
+#### Usage Examples in Claude Code
+
+- **Headless mode (default - fast, no UI):**
+  ```
+  "Use playwright to screenshot https://example.com"
+  ```
+
+- **Visible mode (see the browser in action):**
+  ```
+  "Use playwright to screenshot https://example.com with headless=false"
+  ```
+
+#### Optional: Add Environment Variables
+
+To add credentials or customize behavior:
+```bash
+claude mcp add playwright-mcp "node" "/path/to/playwright-mcp-server/src/index.js" \
+  --scope user \
+  -e TEST_USER=your_email@example.com \
+  -e TEST_PASS=your_password \
+  -e HEADLESS=false \
+  -e SLOW_MO=500
 ```
 
 ### Using with Claude Desktop
@@ -95,7 +128,28 @@ Add the server to your Claude Desktop configuration (`~/Library/Application Supp
 }
 ```
 
+### Manual Server Mode
+
+For development or testing without Claude:
+
+#### Standard Mode
+```bash
+npm start
+```
+
+#### Development Mode (with auto-reload)
+```bash
+npm run dev
+```
+
+#### Docker Mode
+```bash
+docker-compose up
+```
+
 ### Tool Examples
+
+All tools now support a `headless` parameter (default: `true`). Set to `false` to see the browser in action!
 
 #### Take a Screenshot
 ```javascript
@@ -104,7 +158,8 @@ Add the server to your Claude Desktop configuration (`~/Library/Application Supp
   "arguments": {
     "url": "https://example.com",
     "fullPage": true,
-    "filename": "homepage.png"
+    "filename": "homepage.png",
+    "headless": false  // Optional: see the browser window
   }
 }
 ```
@@ -117,7 +172,8 @@ Add the server to your Claude Desktop configuration (`~/Library/Application Supp
     "url": "https://app.example.com/login",
     "usernameSelector": "#email",
     "passwordSelector": "#password",
-    "submitSelector": "button[type='submit']"
+    "submitSelector": "button[type='submit']",
+    "headless": false  // Optional: watch the login process
   }
 }
 ```
