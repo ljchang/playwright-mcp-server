@@ -485,8 +485,12 @@ Configure via `docker-compose.yml` or `.env`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `SCREENSHOTS_DIR` | Directory to save screenshots | `~/.playwright-mcp/screenshots/` |
 | `SCREENSHOT_QUALITY` | JPEG quality (1-100) | `80` |
 | `SCREENSHOT_TYPE` | Image format (png/jpeg) | `png` |
+
+Screenshots are saved to `~/.playwright-mcp/screenshots/` by default (in your home directory).
+You can override this by setting the `SCREENSHOTS_DIR` environment variable.
 
 ## File Structure
 

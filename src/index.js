@@ -13,11 +13,22 @@ import fs from 'fs/promises';
 // Load environment variables
 dotenv.config();
 
+import os from 'os';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCREENSHOTS_DIR = join(__dirname, '..', 'screenshots');
+
+// Determine screenshots directory
+// Priority: 1. Environment variable, 2. User home directory, 3. Project directory
+const SCREENSHOTS_DIR = process.env.SCREENSHOTS_DIR || 
+  join(os.homedir(), '.playwright-mcp', 'screenshots') ||
+  join(__dirname, '..', 'screenshots');
 
 // Ensure screenshots directory exists
 await fs.mkdir(SCREENSHOTS_DIR, { recursive: true });
+// Only log in development mode or when running directly
+if (process.env.NODE_ENV !== 'test' && process.argv[1] === fileURLToPath(import.meta.url)) {
+  console.error(`Screenshots will be saved to: ${SCREENSHOTS_DIR}`);
+}
 
 // Initialize MCP server
 const server = new Server(
