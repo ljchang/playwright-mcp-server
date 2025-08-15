@@ -17,11 +17,24 @@ A Model Context Protocol (MCP) server that provides Playwright browser automatio
 - **generate_pdf** - Convert webpages to PDF documents
 - **monitor_network** - Monitor and capture network requests
 
-### Session Management Tools (NEW!)
+### Session Management Tools
 
 - **start_session** - Start a persistent browser session that stays open
 - **end_session** - Close a specific browser session
 - **list_sessions** - List all active browser sessions
+- **get_session_state** - Get current state of a browser session
+- **get_page_context** - Get detailed page context including forms, buttons, and links
+- **get_screenshot_history** - Get screenshot history for a session
+
+### Debugging & Console Tools (NEW!)
+
+- **console** - Interactive JavaScript console - execute commands in page context
+- **console_history** - Get console command history for the session
+- **inspect_object** - Deep inspect any JavaScript object or variable
+- **execute_script** - Execute JavaScript code in the page
+- **get_debug_info** - Get console logs, errors, and network activity
+- **get_dom_snapshot** - Get structured DOM representation
+- **set_breakpoint** - Set debugging breakpoints in JavaScript code
 
 All tools now support both one-off operations and persistent sessions!
 
@@ -106,13 +119,13 @@ That's it! The server will automatically start when Claude Code needs it.
   "Use playwright to screenshot https://example.com with headless=false"
   ```
 
-##### Persistent Browser Sessions (NEW!)
+##### Persistent Browser Sessions
 
 Keep a browser open for multiple operations - perfect for debugging and interactive testing:
 
-1. **Start a session (browser stays open):**
+1. **Start a session with debugging and screenshots:**
    ```
-   "Start a playwright session and navigate to https://example.com"
+   "Start a playwright session with debugMode=true and recordScreenshots=true"
    ```
    Response will include a sessionId like: `session-1234567890-abc123`
 
@@ -123,12 +136,26 @@ Keep a browser open for multiple operations - perfect for debugging and interact
    "Use playwright session-1234567890-abc123 to take a screenshot"
    ```
 
-3. **List active sessions:**
+3. **Interactive JavaScript console:**
+   ```
+   "Use playwright console for session-1234567890-abc123 to execute: document.title"
+   "Use playwright to inspect window.localStorage in session-1234567890-abc123"
+   "Use playwright to check console logs for session-1234567890-abc123"
+   ```
+
+4. **Debug and inspect:**
+   ```
+   "Get debug info for playwright session-1234567890-abc123"
+   "Get DOM snapshot for #app in session-1234567890-abc123"
+   "Get page context for session-1234567890-abc123"
+   ```
+
+5. **List active sessions:**
    ```
    "List all playwright sessions"
    ```
 
-4. **End a session when done:**
+6. **End a session when done:**
    ```
    "End playwright session-1234567890-abc123"
    ```
@@ -297,13 +324,15 @@ All tools now support:
 
 #### Session Management
 
-##### Start a Persistent Session
+##### Start a Persistent Session with Debugging
 ```javascript
 {
   "tool": "start_session",
   "arguments": {
     "headless": false,  // Default false for sessions
-    "url": "https://example.com"  // Optional initial URL
+    "url": "https://example.com",  // Optional initial URL
+    "debugMode": true,  // Capture console logs, errors, network
+    "recordScreenshots": true  // Auto-capture screenshots after each action
   }
 }
 // Returns: sessionId to use with other tools
@@ -336,6 +365,68 @@ All tools now support:
     "sessionId": "session-1234567890-abc123"
   }
 }
+```
+
+#### Debugging Tools
+
+##### Interactive JavaScript Console
+```javascript
+{
+  "tool": "console",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123",
+    "command": "document.querySelector('#app').innerText",
+    "mode": "eval"  // Options: eval, inspect, watch
+  }
+}
+```
+
+##### Deep Object Inspection
+```javascript
+{
+  "tool": "inspect_object",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123",
+    "expression": "window.localStorage",
+    "depth": 3
+  }
+}
+```
+
+##### Get Debug Information
+```javascript
+{
+  "tool": "get_debug_info",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123",
+    "includeConsole": true,
+    "includeErrors": true,
+    "includeNetwork": true
+  }
+}
+```
+
+##### Get DOM Snapshot
+```javascript
+{
+  "tool": "get_dom_snapshot",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123",
+    "selector": "#app",
+    "includeStyles": true
+  }
+}
+```
+
+##### Get Page Context (Forms, Buttons, Links)
+```javascript
+{
+  "tool": "get_page_context",
+  "arguments": {
+    "sessionId": "session-1234567890-abc123"
+  }
+}
+// Returns all interactive elements on the page
 ```
 
 ## Docker Deployment

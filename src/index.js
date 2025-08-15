@@ -37,7 +37,7 @@ let headlessBrowser = null;
 let headedBrowser = null;
 
 // Store persistent sessions
-const persistentSessions = new Map(); // sessionId -> { browser, context, page }
+const persistentSessions = new Map(); // sessionId -> { browser, context, page, recordScreenshots, screenshots, consoleLogs, errors, networkRequests }
 
 async function getBrowser(headless = true) {
   // Use separate browser instances for headless and headed modes
@@ -67,6 +67,172 @@ function generateSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
+// Capture screenshot for session recording
+async function captureSessionScreenshot(session, sessionId, action = 'action') {
+  if (!session.recordScreenshots) return null;
+  
+  try {
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    const screenshotNum = String(session.screenshots.length + 1).padStart(4, '0');
+    const filename = `${screenshotNum}-${action}-${timestamp}.png`;
+    const filepath = join(SCREENSHOTS_DIR, 'sessions', sessionId, filename);
+    
+    await session.page.screenshot({ 
+      path: filepath,
+      fullPage: false // Just viewport for performance
+    });
+    
+    session.screenshots.push({
+      filename,
+      action,
+      timestamp: new Date().toISOString(),
+      url: session.page.url()
+    });
+    
+    return filename;
+  } catch (e) {
+    console.error(`Failed to capture screenshot: ${e.message}`);
+    return null;
+  }
+}
+
+// Setup debug listeners for a session
+function setupDebugListeners(session) {
+  const page = session.page;
+  
+  // Capture console logs
+  page.on('console', msg => {
+    session.consoleLogs.push({
+      type: msg.type(),
+      text: msg.text(),
+      timestamp: new Date().toISOString(),
+      url: page.url(),
+      args: msg.args().length
+    });
+    
+    // Keep only last 100 logs to avoid memory issues
+    if (session.consoleLogs.length > 100) {
+      session.consoleLogs.shift();
+    }
+  });
+  
+  // Capture page errors
+  page.on('pageerror', error => {
+    session.errors.push({
+      message: error.message,
+      stack: error.stack,
+      timestamp: new Date().toISOString(),
+      url: page.url()
+    });
+  });
+  
+  // Capture network requests (basic info only)
+  page.on('request', request => {
+    if (session.debugMode) {
+      session.networkRequests.push({
+        type: 'request',
+        method: request.method(),
+        url: request.url(),
+        resourceType: request.resourceType(),
+        timestamp: new Date().toISOString()
+      });
+      
+      // Keep only last 200 requests
+      if (session.networkRequests.length > 200) {
+        session.networkRequests.shift();
+      }
+    }
+  });
+  
+  page.on('response', response => {
+    if (session.debugMode) {
+      const request = session.networkRequests.find(r => 
+        r.type === 'request' && r.url === response.url()
+      );
+      if (request) {
+        request.status = response.status();
+        request.statusText = response.statusText();
+        request.responseTime = new Date().toISOString();
+      }
+    }
+  });
+  
+  // Capture failed requests
+  page.on('requestfailed', request => {
+    const failure = request.failure();
+    session.errors.push({
+      type: 'network',
+      message: `Request failed: ${request.url()}`,
+      error: failure ? failure.errorText : 'Unknown error',
+      timestamp: new Date().toISOString()
+    });
+  });
+}
+
+// Get page context with interactive elements
+async function getPageContext(page) {
+  try {
+    const context = await page.evaluate(() => {
+      // Find all interactive elements
+      const forms = Array.from(document.querySelectorAll('form')).map((form, idx) => ({
+        index: idx,
+        id: form.id || null,
+        action: form.action || null,
+        method: form.method || 'GET',
+        inputs: Array.from(form.querySelectorAll('input, select, textarea')).map(input => ({
+          type: input.type || 'text',
+          name: input.name || null,
+          id: input.id || null,
+          placeholder: input.placeholder || null,
+          required: input.required || false,
+          value: input.type === 'password' ? '(hidden)' : (input.value || null),
+          selector: input.id ? `#${input.id}` : input.name ? `[name="${input.name}"]` : `${input.tagName.toLowerCase()}[type="${input.type}"]`
+        }))
+      }));
+      
+      const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]')).map(btn => ({
+        text: btn.textContent?.trim() || btn.value || '',
+        type: btn.type || 'button',
+        selector: btn.id ? `#${btn.id}` : 
+                 btn.textContent ? `button:has-text("${btn.textContent.trim()}")` : 
+                 `${btn.tagName.toLowerCase()}[type="${btn.type}"]`,
+        disabled: btn.disabled || false
+      }));
+      
+      const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 20).map(link => ({
+        text: link.textContent?.trim() || '',
+        href: link.href,
+        selector: link.id ? `#${link.id}` : `a:has-text("${link.textContent?.trim() || ''}")`
+      }));
+      
+      // Get visible text headings for context
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 10).map(h => ({
+        level: h.tagName,
+        text: h.textContent?.trim() || ''
+      }));
+      
+      return {
+        forms,
+        buttons: buttons.filter(b => b.text || b.type === 'submit'),
+        links: links.filter(l => l.text && !l.href.startsWith('javascript:')),
+        headings
+      };
+    });
+    
+    return {
+      url: page.url(),
+      title: await page.title(),
+      ...context
+    };
+  } catch (e) {
+    return {
+      url: page.url(),
+      title: await page.title(),
+      error: `Failed to analyze page: ${e.message}`
+    };
+  }
+}
+
 // Get or create a session
 async function getOrCreateSession(sessionId, headless = true) {
   if (sessionId && persistentSessions.has(sessionId)) {
@@ -87,7 +253,19 @@ async function getOrCreateSession(sessionId, headless = true) {
   
   const page = await context.newPage();
   
-  const session = { browser, context, page };
+  const session = { 
+    browser, 
+    context, 
+    page, 
+    recordScreenshots: false, 
+    screenshots: [],
+    consoleLogs: [],
+    errors: [],
+    networkRequests: [],
+    debugMode: false,
+    consoleHistory: [],
+    watchedExpressions: new Map()
+  };
   
   if (sessionId) {
     persistentSessions.set(sessionId, session);
@@ -472,6 +650,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Initial URL to navigate to (optional)',
           },
+          recordScreenshots: {
+            type: 'boolean',
+            description: 'Capture a screenshot after each action (default: false)',
+            default: false,
+          },
+          debugMode: {
+            type: 'boolean',
+            description: 'Enable debug mode to capture console logs, errors, and network activity (default: false)',
+            default: false,
+          },
         },
         required: [],
       },
@@ -499,6 +687,214 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: [],
       },
     },
+    {
+      name: 'get_screenshot_history',
+      description: 'Get the screenshot history for a session',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID to get screenshot history for',
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'get_session_state',
+      description: 'Get current state of a browser session (URL, title, cookies, etc)',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID to query',
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'get_page_context',
+      description: 'Get detailed context about the current page including forms, buttons, links, and other interactive elements',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID to analyze',
+          },
+          url: {
+            type: 'string',
+            description: 'URL to navigate to first (optional if already on page)',
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'get_debug_info',
+      description: 'Get debug information including console logs, errors, and network activity',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID to get debug info for',
+          },
+          includeNetwork: {
+            type: 'boolean',
+            description: 'Include network requests (default: true)',
+            default: true,
+          },
+          includeConsole: {
+            type: 'boolean',
+            description: 'Include console logs (default: true)',
+            default: true,
+          },
+          includeErrors: {
+            type: 'boolean',
+            description: 'Include errors (default: true)',
+            default: true,
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'get_dom_snapshot',
+      description: 'Get a snapshot of the DOM structure',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          selector: {
+            type: 'string',
+            description: 'CSS selector to get DOM for (default: body)',
+            default: 'body',
+          },
+          includeStyles: {
+            type: 'boolean',
+            description: 'Include computed styles (default: false)',
+            default: false,
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'execute_script',
+      description: 'Execute JavaScript in the page context (useful for custom debugging)',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          script: {
+            type: 'string',
+            description: 'JavaScript code to execute',
+          },
+        },
+        required: ['sessionId', 'script'],
+      },
+    },
+    {
+      name: 'console',
+      description: 'Interactive JavaScript console - execute commands and inspect results',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          command: {
+            type: 'string',
+            description: 'JavaScript command to execute in console',
+          },
+          mode: {
+            type: 'string',
+            description: 'Execution mode: eval (default), inspect, watch',
+            default: 'eval',
+          },
+        },
+        required: ['sessionId', 'command'],
+      },
+    },
+    {
+      name: 'console_history',
+      description: 'Get console command history for the session',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          limit: {
+            type: 'number',
+            description: 'Number of recent commands to return (default: 20)',
+            default: 20,
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
+    {
+      name: 'inspect_object',
+      description: 'Deep inspect a JavaScript object or variable',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          expression: {
+            type: 'string',
+            description: 'JavaScript expression to inspect (e.g., window.localStorage, document.cookie)',
+          },
+          depth: {
+            type: 'number',
+            description: 'Maximum depth to inspect (default: 3)',
+            default: 3,
+          },
+        },
+        required: ['sessionId', 'expression'],
+      },
+    },
+    {
+      name: 'set_breakpoint',
+      description: 'Set a breakpoint in JavaScript code',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'string',
+            description: 'Session ID',
+          },
+          url: {
+            type: 'string',
+            description: 'URL pattern to match',
+          },
+          lineNumber: {
+            type: 'number',
+            description: 'Line number to break at',
+          },
+          condition: {
+            type: 'string',
+            description: 'Optional conditional expression',
+          },
+        },
+        required: ['sessionId'],
+      },
+    },
   ],
 }));
 
@@ -512,15 +908,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const headless = args.headless !== undefined ? args.headless : false; // Default to visible for sessions
       const session = await getOrCreateSession(sessionId, headless);
       
+      // Set screenshot recording preference
+      session.recordScreenshots = args.recordScreenshots || false;
+      session.debugMode = args.debugMode || false;
+      
+      // Setup debug listeners
+      setupDebugListeners(session);
+      
+      // Create session-specific screenshot directory
+      if (session.recordScreenshots) {
+        const sessionScreenshotDir = join(SCREENSHOTS_DIR, 'sessions', sessionId);
+        await fs.mkdir(sessionScreenshotDir, { recursive: true });
+      }
+      
       if (args.url) {
-        await session.page.goto(args.url, { waitUntil: 'networkidle' });
+        const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+        await session.page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        
+        // Capture initial screenshot if recording
+        if (session.recordScreenshots) {
+          await captureSessionScreenshot(session, sessionId, 'initial');
+        }
       }
       
       return {
         content: [
           {
             type: 'text',
-            text: `Started session: ${sessionId}\nBrowser is ${headless ? 'headless' : 'visible'}\n${args.url ? `Navigated to: ${args.url}` : 'Ready for commands'}\n\nUse this sessionId with other tools to interact with this browser session.`,
+            text: `Started session: ${sessionId}\nBrowser is ${headless ? 'headless' : 'visible'}\nScreenshot recording: ${session.recordScreenshots ? 'ON' : 'OFF'}\nDebug mode: ${session.debugMode ? 'ON (capturing console, errors, network)' : 'OFF'}\n${args.url ? `Navigated to: ${args.url}` : 'Ready for commands'}\n\nUse this sessionId with other tools to interact with this browser session.`,
           },
         ],
       };
@@ -554,7 +969,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     
     if (name === 'list_sessions') {
-      const sessions = Array.from(persistentSessions.keys());
+      const sessions = [];
+      for (const [id, session] of persistentSessions) {
+        try {
+          const url = session.page.url();
+          const title = await session.page.title();
+          sessions.push(`${id}: ${url} - "${title}"`);
+        } catch (e) {
+          sessions.push(`${id}: (session error)`);
+        }
+      }
       return {
         content: [
           {
@@ -565,6 +989,733 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
         ],
       };
+    }
+    
+    if (name === 'get_session_state') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      try {
+        const state = {
+          url: session.page.url(),
+          title: await session.page.title(),
+          viewport: session.page.viewportSize(),
+          cookies: await session.context.cookies(),
+        };
+        
+        let responseText = `Session State for ${args.sessionId}:\nURL: ${state.url}\nTitle: ${state.title}\nViewport: ${state.viewport.width}x${state.viewport.height}\nCookies: ${state.cookies.length} cookies set`;
+        
+        // Add screenshot history if recording
+        if (session.recordScreenshots) {
+          responseText += `\n\nScreenshot Recording: ON`;
+          responseText += `\nScreenshots captured: ${session.screenshots.length}`;
+          if (session.screenshots.length > 0) {
+            responseText += `\nLast 5 screenshots:`;
+            session.screenshots.slice(-5).forEach(shot => {
+              responseText += `\n  - ${shot.filename} (${shot.action})`;
+            });
+          }
+        } else {
+          responseText += `\n\nScreenshot Recording: OFF`;
+        }
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: responseText,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error getting session state: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'get_screenshot_history') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      if (!session.recordScreenshots) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Screenshot recording is not enabled for session: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      const screenshotDir = join(SCREENSHOTS_DIR, 'sessions', args.sessionId);
+      let responseText = `Screenshot History for ${args.sessionId}:\n`;
+      responseText += `Total screenshots: ${session.screenshots.length}\n`;
+      responseText += `Screenshot directory: ${screenshotDir}\n\n`;
+      
+      if (session.screenshots.length > 0) {
+        responseText += `Screenshots (in order):\n`;
+        session.screenshots.forEach((shot, idx) => {
+          responseText += `${idx + 1}. ${shot.filename}\n`;
+          responseText += `   Action: ${shot.action}\n`;
+          responseText += `   URL: ${shot.url}\n`;
+          responseText += `   Time: ${shot.timestamp}\n\n`;
+        });
+      } else {
+        responseText += `No screenshots captured yet.`;
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'get_page_context') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      try {
+        // Navigate if URL provided
+        if (args.url && session.page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await session.page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
+        
+        const context = await getPageContext(session.page);
+        
+        // Format the response
+        let response = `Page Context for ${args.sessionId}:\n`;
+        response += `URL: ${context.url}\n`;
+        response += `Title: ${context.title}\n\n`;
+        
+        if (context.headings && context.headings.length > 0) {
+          response += `Headings:\n`;
+          context.headings.forEach(h => {
+            response += `  ${h.level}: ${h.text}\n`;
+          });
+          response += '\n';
+        }
+        
+        if (context.forms && context.forms.length > 0) {
+          response += `Forms (${context.forms.length}):\n`;
+          context.forms.forEach((form, idx) => {
+            response += `  Form ${idx}: ${form.method} to ${form.action || '(same page)'}\n`;
+            form.inputs.forEach(input => {
+              response += `    - ${input.type} ${input.name || input.id || '(unnamed)'}: selector="${input.selector}"${input.required ? ' (required)' : ''}\n`;
+            });
+          });
+          response += '\n';
+        }
+        
+        if (context.buttons && context.buttons.length > 0) {
+          response += `Buttons (${context.buttons.length}):\n`;
+          context.buttons.forEach(btn => {
+            response += `  - "${btn.text}" selector="${btn.selector}"${btn.disabled ? ' (disabled)' : ''}\n`;
+          });
+          response += '\n';
+        }
+        
+        if (context.links && context.links.length > 0) {
+          response += `Links (showing first ${context.links.length}):\n`;
+          context.links.forEach(link => {
+            response += `  - "${link.text}" -> ${link.href}\n`;
+          });
+        }
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: response,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error analyzing page: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'get_debug_info') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      let responseText = `Debug Information for ${args.sessionId}:\n`;
+      responseText += `Current URL: ${session.page.url()}\n\n`;
+      
+      // Console logs
+      if (args.includeConsole !== false && session.consoleLogs.length > 0) {
+        responseText += `=== Console Logs (last ${session.consoleLogs.length}) ===\n`;
+        session.consoleLogs.slice(-20).forEach(log => {
+          responseText += `[${log.type}] ${log.timestamp.split('T')[1].split('.')[0]}: ${log.text}\n`;
+        });
+        responseText += '\n';
+      }
+      
+      // Errors
+      if (args.includeErrors !== false && session.errors.length > 0) {
+        responseText += `=== Errors (${session.errors.length} total) ===\n`;
+        session.errors.slice(-10).forEach(error => {
+          responseText += `[${error.type || 'js'}] ${error.message}\n`;
+          if (error.stack) {
+            responseText += `  Stack: ${error.stack.split('\n')[0]}\n`;
+          }
+        });
+        responseText += '\n';
+      }
+      
+      // Network requests
+      if (args.includeNetwork !== false && session.debugMode && session.networkRequests.length > 0) {
+        responseText += `=== Recent Network Activity ===\n`;
+        const recentRequests = session.networkRequests.slice(-20);
+        const failedRequests = recentRequests.filter(r => r.status >= 400);
+        
+        if (failedRequests.length > 0) {
+          responseText += `Failed requests:\n`;
+          failedRequests.forEach(req => {
+            responseText += `  ${req.status} ${req.method} ${req.url}\n`;
+          });
+        }
+        
+        responseText += `\nTotal requests: ${session.networkRequests.length}\n`;
+        responseText += `Recent: ${recentRequests.filter(r => r.status < 400).length} successful, ${failedRequests.length} failed\n`;
+      }
+      
+      if (!session.debugMode) {
+        responseText += '\nNote: Debug mode is OFF. Enable it when starting session to capture network activity.\n';
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'get_dom_snapshot') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      try {
+        const selector = args.selector || 'body';
+        const includeStyles = args.includeStyles || false;
+        
+        const domSnapshot = await session.page.evaluate(({sel, styles}) => {
+          const element = document.querySelector(sel);
+          if (!element) return null;
+          
+          function extractDOM(el, depth = 0, maxDepth = 5) {
+            if (depth > maxDepth) return { tag: '...truncated...' };
+            
+            const result = {
+              tag: el.tagName.toLowerCase(),
+              id: el.id || undefined,
+              classes: el.className ? el.className.split(' ').filter(c => c) : undefined,
+              text: el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 
+                ? el.childNodes[0].textContent.trim().substring(0, 100) 
+                : undefined,
+              attributes: {}
+            };
+            
+            // Get key attributes
+            ['href', 'src', 'type', 'name', 'value', 'placeholder'].forEach(attr => {
+              if (el.hasAttribute(attr)) {
+                result.attributes[attr] = el.getAttribute(attr);
+              }
+            });
+            
+            if (styles && depth < 3) {
+              const computed = window.getComputedStyle(el);
+              result.styles = {
+                display: computed.display,
+                position: computed.position,
+                visibility: computed.visibility,
+                opacity: computed.opacity
+              };
+            }
+            
+            // Get children
+            if (el.children.length > 0 && depth < maxDepth) {
+              result.children = Array.from(el.children)
+                .slice(0, 10) // Limit children
+                .map(child => extractDOM(child, depth + 1, maxDepth));
+            }
+            
+            return result;
+          }
+          
+          return extractDOM(element);
+        }, { sel: selector, styles: includeStyles });
+        
+        if (!domSnapshot) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Element not found: ${selector}`,
+              },
+            ],
+          };
+        }
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `DOM Snapshot for ${selector}:\n${JSON.stringify(domSnapshot, null, 2)}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error getting DOM snapshot: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'execute_script') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      try {
+        const result = await session.page.evaluate(args.script);
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Script executed successfully.\nResult: ${JSON.stringify(result, null, 2)}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Script execution failed: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'console') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      const command = args.command;
+      const mode = args.mode || 'eval';
+      
+      // Add to history
+      session.consoleHistory.push({
+        command,
+        timestamp: new Date().toISOString(),
+        url: session.page.url()
+      });
+      
+      // Keep only last 100 commands
+      if (session.consoleHistory.length > 100) {
+        session.consoleHistory.shift();
+      }
+      
+      try {
+        let result;
+        
+        if (mode === 'eval') {
+          // Standard evaluation
+          result = await session.page.evaluate((cmd) => {
+            try {
+              const result = eval(cmd);
+              
+              // Enhanced serialization for common objects
+              if (result === undefined) return 'undefined';
+              if (result === null) return 'null';
+              if (typeof result === 'function') return `[Function: ${result.name || 'anonymous'}]`;
+              if (result instanceof Error) return `Error: ${result.message}\n${result.stack}`;
+              if (result instanceof HTMLElement) return `<${result.tagName.toLowerCase()} id="${result.id}" class="${result.className}">`;
+              if (result instanceof NodeList) return `NodeList[${result.length}]`;
+              if (result instanceof Window) return '[Window object]';
+              if (result instanceof Document) return '[Document object]';
+              
+              return result;
+            } catch (e) {
+              return `Error: ${e.message}`;
+            }
+          }, command);
+        } else if (mode === 'inspect') {
+          // Deep inspection mode
+          result = await session.page.evaluate((cmd) => {
+            try {
+              const obj = eval(cmd);
+              
+              function inspect(o, depth = 0, maxDepth = 3, seen = new Set()) {
+                if (depth > maxDepth) return '...';
+                if (seen.has(o)) return '[Circular]';
+                
+                if (o === null) return 'null';
+                if (o === undefined) return 'undefined';
+                if (typeof o !== 'object') return o;
+                
+                seen.add(o);
+                
+                if (Array.isArray(o)) {
+                  return o.map(item => inspect(item, depth + 1, maxDepth, seen));
+                }
+                
+                const result = {};
+                for (let key in o) {
+                  try {
+                    result[key] = inspect(o[key], depth + 1, maxDepth, seen);
+                  } catch (e) {
+                    result[key] = `[Error: ${e.message}]`;
+                  }
+                }
+                return result;
+              }
+              
+              return inspect(obj);
+            } catch (e) {
+              return `Error: ${e.message}`;
+            }
+          }, command);
+        } else if (mode === 'watch') {
+          // Add to watched expressions
+          session.watchedExpressions.set(command, true);
+          
+          result = await session.page.evaluate((cmd) => {
+            try {
+              return eval(cmd);
+            } catch (e) {
+              return `Error: ${e.message}`;
+            }
+          }, command);
+          
+          result = `Added to watch: ${command}\nCurrent value: ${JSON.stringify(result)}`;
+        }
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `> ${command}\n${typeof result === 'object' ? JSON.stringify(result, null, 2) : result}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Console error: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'console_history') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      const limit = args.limit || 20;
+      const history = session.consoleHistory.slice(-limit);
+      
+      if (history.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No console history for session ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      let responseText = `Console History (last ${history.length} commands):\n\n`;
+      history.forEach((entry, idx) => {
+        responseText += `${idx + 1}. [${entry.timestamp.split('T')[1].split('.')[0]}] ${entry.command}\n`;
+      });
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'inspect_object') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      const depth = args.depth || 3;
+      
+      try {
+        const result = await session.page.evaluate(({expr, maxDepth}) => {
+          try {
+            const obj = eval(expr);
+            
+            function deepInspect(o, depth = 0, seen = new WeakSet()) {
+              if (depth > maxDepth) return '...depth limit...';
+              
+              if (o === null) return null;
+              if (o === undefined) return undefined;
+              
+              const type = typeof o;
+              
+              if (type !== 'object' && type !== 'function') {
+                return o;
+              }
+              
+              if (seen.has(o)) return '[Circular Reference]';
+              seen.add(o);
+              
+              // Special handling for common types
+              if (o instanceof Date) return o.toISOString();
+              if (o instanceof RegExp) return o.toString();
+              if (o instanceof Error) return { name: o.name, message: o.message, stack: o.stack };
+              if (o instanceof HTMLElement) {
+                return {
+                  tagName: o.tagName,
+                  id: o.id,
+                  className: o.className,
+                  innerHTML: o.innerHTML.substring(0, 200),
+                  attributes: Array.from(o.attributes).map(a => ({name: a.name, value: a.value}))
+                };
+              }
+              
+              if (Array.isArray(o)) {
+                return o.map(item => deepInspect(item, depth + 1, seen));
+              }
+              
+              // For objects and functions
+              const result = {
+                __type: type === 'function' ? `Function: ${o.name || 'anonymous'}` : o.constructor.name
+              };
+              
+              // Get own properties
+              const props = Object.getOwnPropertyNames(o);
+              for (const prop of props.slice(0, 100)) { // Limit properties
+                try {
+                  const descriptor = Object.getOwnPropertyDescriptor(o, prop);
+                  if (descriptor.get) {
+                    result[prop] = '[Getter]';
+                  } else if (descriptor.set) {
+                    result[prop] = '[Setter]';
+                  } else {
+                    result[prop] = deepInspect(descriptor.value, depth + 1, seen);
+                  }
+                } catch (e) {
+                  result[prop] = `[Error: ${e.message}]`;
+                }
+              }
+              
+              // Get prototype if interesting
+              if (depth < 2 && o.constructor && o.constructor.name !== 'Object') {
+                const proto = Object.getPrototypeOf(o);
+                if (proto && proto !== Object.prototype) {
+                  result.__proto__ = {
+                    constructor: proto.constructor.name,
+                    methods: Object.getOwnPropertyNames(proto).filter(p => typeof proto[p] === 'function')
+                  };
+                }
+              }
+              
+              return result;
+            }
+            
+            return deepInspect(obj);
+          } catch (e) {
+            return { error: e.message, stack: e.stack };
+          }
+        }, { expr: args.expression, maxDepth: depth });
+        
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Inspecting: ${args.expression}\n\n${JSON.stringify(result, null, 2)}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Inspection failed: ${e.message}`,
+            },
+          ],
+        };
+      }
+    }
+    
+    if (name === 'set_breakpoint') {
+      const session = persistentSessions.get(args.sessionId);
+      if (!session) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session not found: ${args.sessionId}`,
+            },
+          ],
+        };
+      }
+      
+      try {
+        // Enable Chrome DevTools Protocol for debugging
+        const client = await session.page.context().newCDPSession(session.page);
+        await client.send('Debugger.enable');
+        
+        if (args.url && args.lineNumber) {
+          // Set breakpoint by URL and line
+          const response = await client.send('Debugger.setBreakpointByUrl', {
+            lineNumber: args.lineNumber - 1, // CDP uses 0-based line numbers
+            url: args.url,
+            condition: args.condition
+          });
+          
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Breakpoint set at ${args.url}:${args.lineNumber}\nBreakpoint ID: ${response.breakpointId}`,
+              },
+            ],
+          };
+        } else {
+          // Pause execution now
+          await client.send('Debugger.pause');
+          
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Debugger paused. Use browser DevTools to inspect.`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Failed to set breakpoint: ${e.message}`,
+            },
+          ],
+        };
+      }
     }
     
     // For other tools, check if sessionId is provided
@@ -592,7 +1743,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     switch (name) {
       case 'screenshot': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
         const filename = args.filename || `screenshot-${timestamp}.png`;
@@ -630,19 +1785,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error('Username and password required (set TEST_USER and TEST_PASS in .env)');
         }
         
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
-        // Fill login form
-        await page.fill(args.usernameSelector, username);
-        await page.fill(args.passwordSelector, password);
+        // Try multiple selectors for better compatibility
+        const usernameSelectors = args.usernameSelector.split(',').map(s => s.trim());
+        const passwordSelectors = args.passwordSelector.split(',').map(s => s.trim());
+        
+        // Find and fill username field
+        let usernameFilled = false;
+        for (const selector of usernameSelectors) {
+          try {
+            await page.waitForSelector(selector, { timeout: 5000 });
+            await page.fill(selector, username);
+            usernameFilled = true;
+            break;
+          } catch (e) {
+            // Try next selector
+          }
+        }
+        if (!usernameFilled) {
+          throw new Error(`Could not find username field with selectors: ${args.usernameSelector}`);
+        }
+        
+        // Find and fill password field
+        let passwordFilled = false;
+        for (const selector of passwordSelectors) {
+          try {
+            await page.waitForSelector(selector, { timeout: 5000 });
+            await page.fill(selector, password);
+            passwordFilled = true;
+            break;
+          } catch (e) {
+            // Try next selector
+          }
+        }
+        if (!passwordFilled) {
+          throw new Error(`Could not find password field with selectors: ${args.passwordSelector}`);
+        }
         
         // Take pre-login screenshot
         await page.screenshot({ 
           path: join(SCREENSHOTS_DIR, 'pre-login.png') 
         });
         
-        // Submit form
-        await page.click(args.submitSelector);
+        // Try multiple submit selectors
+        const submitSelectors = args.submitSelector.split(',').map(s => s.trim());
+        let submitted = false;
+        for (const selector of submitSelectors) {
+          try {
+            await page.waitForSelector(selector, { timeout: 5000 });
+            await page.click(selector);
+            submitted = true;
+            break;
+          } catch (e) {
+            // Try next selector
+          }
+        }
+        if (!submitted) {
+          throw new Error(`Could not find submit button with selectors: ${args.submitSelector}`);
+        }
         
         // Wait for navigation or login to complete
         await page.waitForLoadState('networkidle');
@@ -669,7 +1874,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'fill_form': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         // Fill each form field
         for (const [selector, value] of Object.entries(args.formData)) {
@@ -688,20 +1897,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           path: join(SCREENSHOTS_DIR, `form-${timestamp}.png`) 
         });
         
+        // Capture screenshot if recording
+        if (args.sessionId) {
+          const session = persistentSessions.get(args.sessionId);
+          if (session && session.recordScreenshots) {
+            await captureSessionScreenshot(session, args.sessionId, 'form-filled');
+          }
+        }
+        
+        // Get context after form submission for persistent sessions
+        let responseText = `Form filled successfully. Screenshot saved.`;
+        
+        if (args.sessionId) {
+          try {
+            const session = persistentSessions.get(args.sessionId);
+            const context = await getPageContext(page);
+            responseText += `\n\nCurrent page: ${page.url()}`;
+            responseText += `\nPage title: ${context.title}`;
+            
+            // Add summary of what's available now
+            if (context.buttons && context.buttons.length > 0) {
+              responseText += `\n\nAvailable buttons: ${context.buttons.slice(0, 5).map(b => `"${b.text}"`).join(', ')}`;
+            }
+            if (context.forms && context.forms.length > 0) {
+              responseText += `\n${context.forms.length} form(s) available`;
+            }
+            
+            // Add screenshot info if recording
+            if (session && session.recordScreenshots) {
+              responseText += `\n\nScreenshot captured (${session.screenshots.length} total)`;
+            }
+            
+            responseText += '\n\nUse get_page_context to see all interactive elements.';
+          } catch (e) {
+            // Ignore context errors
+          }
+        }
+        
         if (shouldCloseContext) await context.close();
         
         return {
           content: [
             {
               type: 'text',
-              text: `Form filled successfully. Screenshot saved.`,
+              text: responseText,
             },
           ],
         };
       }
 
       case 'check_element': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         const element = await page.locator(args.selector).first();
         const exists = await element.count() > 0;
@@ -741,7 +1991,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'navigate_and_wait': {
-        await page.goto(args.url, { timeout: args.timeout || 30000 });
+        // Always navigate for this tool as it's its primary purpose
+        const timeout = args.timeout || parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+        await page.goto(args.url, { timeout });
         
         if (args.waitFor === 'selector' && args.waitSelector) {
           await page.waitForSelector(args.waitSelector, { timeout: args.timeout || 30000 });
@@ -751,6 +2003,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         const title = await page.title();
         const url = page.url();
+        
+        // Capture screenshot if recording
+        if (args.sessionId) {
+          const session = persistentSessions.get(args.sessionId);
+          if (session && session.recordScreenshots) {
+            await captureSessionScreenshot(session, args.sessionId, 'navigate');
+          }
+        }
         
         if (shouldCloseContext) await context.close();
         
@@ -765,7 +2025,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'click_and_wait': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         const element = await page.locator(args.selector).first();
         await element.click();
@@ -778,7 +2042,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await page.waitForTimeout(args.waitTimeout || 3000);
         }
         
-        const newUrl = page.url();
+        // Capture screenshot if recording
+        if (args.sessionId) {
+          const session = persistentSessions.get(args.sessionId);
+          if (session && session.recordScreenshots) {
+            await captureSessionScreenshot(session, args.sessionId, `click-${args.selector.substring(0, 20)}`);
+          }
+        }
+        
+        // Get context after click for persistent sessions
+        let responseText = `Clicked: ${args.selector}\nNew URL: ${page.url()}`;
+        
+        if (args.sessionId) {
+          try {
+            const session = persistentSessions.get(args.sessionId);
+            const context = await getPageContext(page);
+            responseText += `\nPage title: ${context.title}`;
+            
+            // Add summary of available actions
+            if (context.buttons && context.buttons.length > 0) {
+              responseText += `\n\nAvailable buttons: ${context.buttons.slice(0, 5).map(b => `"${b.text}"`).join(', ')}`;
+            }
+            if (context.forms && context.forms.length > 0) {
+              responseText += `\n${context.forms.length} form(s) available`;
+            }
+            if (context.links && context.links.length > 0) {
+              responseText += `\n${context.links.length} links available`;
+            }
+            
+            // Add screenshot info if recording
+            if (session && session.recordScreenshots) {
+              responseText += `\n\nScreenshot captured (${session.screenshots.length} total)`;
+            }
+            
+            responseText += '\n\nUse get_page_context to see all interactive elements.';
+          } catch (e) {
+            // Ignore context errors
+          }
+        }
         
         if (shouldCloseContext) await context.close();
         
@@ -786,14 +2087,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Clicked: ${args.selector}\nNew URL: ${newUrl}`,
+              text: responseText,
             },
           ],
         };
       }
 
       case 'extract_text': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         const results = {};
         
@@ -823,7 +2128,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'run_accessibility_check': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         // Take screenshot for visual reference
         const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
@@ -862,7 +2171,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'generate_pdf': {
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
         const filename = args.filename || `document-${timestamp}.pdf`;
@@ -910,7 +2223,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
         });
         
-        await page.goto(args.url, { waitUntil: 'networkidle' });
+        // Only navigate if URL is different from current page
+        if (!args.sessionId || page.url() !== args.url) {
+          const timeout = parseInt(process.env.NAVIGATION_TIMEOUT) || 30000;
+          await page.goto(args.url, { waitUntil: 'networkidle', timeout });
+        }
         
         if (shouldCloseContext) await context.close();
         

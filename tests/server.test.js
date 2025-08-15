@@ -44,21 +44,45 @@ test('Server handles tools/list request', async (t) => {
 
   server.stdin.write(request + '\n');
 
-  await new Promise((resolve) => {
-    server.stdout.once('data', (data) => {
-      const response = JSON.parse(data.toString());
-      assert(response.result, 'Should have result');
-      assert(Array.isArray(response.result.tools), 'Should return tools array');
-      assert(response.result.tools.length > 0, 'Should have tools');
+  await new Promise((resolve, reject) => {
+    let buffer = '';
+    
+    const onData = (data) => {
+      buffer += data.toString();
       
-      // Check for specific tools
-      const toolNames = response.result.tools.map(t => t.name);
-      assert(toolNames.includes('screenshot'), 'Should have screenshot tool');
-      assert(toolNames.includes('test_login'), 'Should have test_login tool');
-      assert(toolNames.includes('run_accessibility_check'), 'Should have accessibility check tool');
-      
-      resolve();
-    });
+      // Try to parse the buffer as complete JSON
+      try {
+        const response = JSON.parse(buffer);
+        
+        // Clean up listener
+        server.stdout.removeListener('data', onData);
+        
+        assert(response.result, 'Should have result');
+        assert(Array.isArray(response.result.tools), 'Should return tools array');
+        assert(response.result.tools.length > 0, 'Should have tools');
+        
+        // Check for specific tools
+        const toolNames = response.result.tools.map(t => t.name);
+        assert(toolNames.includes('screenshot'), 'Should have screenshot tool');
+        assert(toolNames.includes('test_login'), 'Should have test_login tool');
+        assert(toolNames.includes('run_accessibility_check'), 'Should have accessibility check tool');
+        
+        resolve();
+      } catch (e) {
+        // Not complete JSON yet, wait for more data
+        if (!e.message.includes('JSON')) {
+          reject(e);
+        }
+      }
+    };
+    
+    server.stdout.on('data', onData);
+    
+    // Timeout after 5 seconds
+    setTimeout(() => {
+      server.stdout.removeListener('data', onData);
+      reject(new Error('Timeout waiting for response'));
+    }, 5000);
   });
 
   server.kill();
