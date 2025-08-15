@@ -32,17 +32,31 @@ const server = new Server(
   }
 );
 
-// Store browser instance for reuse
-let browser = null;
+// Store browser instances for reuse
+let headlessBrowser = null;
+let headedBrowser = null;
 
-async function getBrowser() {
-  if (!browser) {
-    browser = await chromium.launch({
-      headless: process.env.HEADLESS !== 'false',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+async function getBrowser(headless = true) {
+  // Use separate browser instances for headless and headed modes
+  if (headless) {
+    if (!headlessBrowser) {
+      headlessBrowser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    }
+    return headlessBrowser;
+  } else {
+    if (!headedBrowser) {
+      const slowMo = parseInt(process.env.SLOW_MO) || 0;
+      headedBrowser = await chromium.launch({
+        headless: false,
+        slowMo: slowMo, // Add delay between actions for visibility
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    }
+    return headedBrowser;
   }
-  return browser;
 }
 
 // Register tool handlers
@@ -70,6 +84,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           filename: {
             type: 'string',
             description: 'Output filename (optional)',
+          },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
           },
         },
         required: ['url'],
@@ -108,6 +127,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Password (uses TEST_PASS env var if not provided)',
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url'],
       },
@@ -131,6 +155,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Selector for submit button (optional)',
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url', 'formData'],
       },
@@ -152,6 +181,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           expectedText: {
             type: 'string',
             description: 'Expected text content (optional)',
+          },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
           },
         },
         required: ['url', 'selector'],
@@ -180,6 +214,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'number',
             description: 'Timeout in milliseconds',
             default: 30000,
+          },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
           },
         },
         required: ['url'],
@@ -213,6 +252,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Time to wait in ms',
             default: 3000,
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url', 'selector'],
       },
@@ -239,6 +283,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Extract all matching elements (true) or just first (false)',
             default: false,
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url', 'selectors'],
       },
@@ -257,6 +306,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Accessibility standard: WCAG2A, WCAG2AA, WCAG2AAA',
             default: 'WCAG2AA',
+          },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
           },
         },
         required: ['url'],
@@ -286,6 +340,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Use landscape orientation',
             default: false,
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url'],
       },
@@ -312,6 +371,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             },
             default: ['xhr', 'fetch'],
           },
+          headless: {
+            type: 'boolean',
+            description: 'Run browser in headless mode (default: true)',
+            default: true,
+          },
         },
         required: ['url'],
       },
@@ -323,7 +387,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    const browser = await getBrowser();
+    // Use headless parameter from args, defaulting to true if not specified
+    const headless = args.headless !== false;
+    const browser = await getBrowser(headless);
+    
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
       userAgent: 'Mozilla/5.0 (Playwright MCP Testing)',
@@ -682,8 +749,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Cleanup on shutdown
 process.on('SIGINT', async () => {
-  if (browser) {
-    await browser.close();
+  if (headlessBrowser) {
+    await headlessBrowser.close();
+  }
+  if (headedBrowser) {
+    await headedBrowser.close();
   }
   process.exit(0);
 });
