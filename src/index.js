@@ -50,6 +50,116 @@ let headedBrowser = null;
 // Store persistent sessions
 const persistentSessions = new Map(); // sessionId -> { browser, context, page, recordScreenshots, screenshots, consoleLogs, errors, networkRequests }
 
+// Store test scenarios
+const testScenarios = new Map(); // scenarioId -> TestScenario object
+
+// TestScenario class for managing multi-participant tests
+class TestScenario {
+  constructor(id, metadata = {}) {
+    this.scenarioId = id;
+    this.createdAt = new Date().toISOString();
+    this.metadata = {
+      name: metadata.name || 'Unnamed Scenario',
+      description: metadata.description || '',
+      experimentName: metadata.experimentName || '',
+      testParameters: metadata.testParameters || {},
+      tags: metadata.tags || []
+    };
+    this.sessions = new Map(); // sessionId -> { role, label, status, joinedAt }
+    this.state = {
+      phase: 'created', // created, running, completed, failed
+      customData: metadata.initialState || {}
+    };
+    this.events = []; // Timeline of events for debugging
+  }
+
+  // Add a session to this scenario
+  addSession(sessionId, role, label) {
+    this.sessions.set(sessionId, {
+      role: role || 'participant',
+      label: label || sessionId,
+      status: 'active',
+      joinedAt: new Date().toISOString()
+    });
+    this.logEvent('session_joined', { sessionId, role, label });
+  }
+
+  // Remove a session from this scenario
+  removeSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      this.sessions.delete(sessionId);
+      this.logEvent('session_left', { sessionId, role: session.role, label: session.label });
+    }
+  }
+
+  // Update scenario state
+  updateState(updates) {
+    if (updates.phase) {
+      this.state.phase = updates.phase;
+    }
+    if (updates.customData) {
+      Object.assign(this.state.customData, updates.customData);
+    }
+    this.logEvent('state_updated', updates);
+  }
+
+  // Log an event for debugging
+  logEvent(type, data) {
+    this.events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      data
+    });
+    // Keep only last 500 events to avoid memory issues
+    if (this.events.length > 500) {
+      this.events.shift();
+    }
+  }
+
+  // Get sessions by role
+  getSessionsByRole(role) {
+    const result = [];
+    for (const [sessionId, info] of this.sessions.entries()) {
+      if (info.role === role) {
+        result.push({ sessionId, ...info });
+      }
+    }
+    return result;
+  }
+
+  // Get session by label
+  getSessionByLabel(label) {
+    for (const [sessionId, info] of this.sessions.entries()) {
+      if (info.label === label) {
+        return { sessionId, ...info };
+      }
+    }
+    return null;
+  }
+
+  // Get scenario summary
+  getSummary() {
+    return {
+      scenarioId: this.scenarioId,
+      createdAt: this.createdAt,
+      metadata: this.metadata,
+      state: this.state,
+      sessionCount: this.sessions.size,
+      sessions: Array.from(this.sessions.entries()).map(([id, info]) => ({
+        sessionId: id,
+        ...info
+      })),
+      eventCount: this.events.length
+    };
+  }
+}
+
+// Generate a unique scenario ID
+function generateScenarioId() {
+  return `scenario-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
 async function getBrowser(headless = true) {
   // Use separate browser instances for headless and headed modes
   if (headless) {
@@ -245,7 +355,7 @@ async function getPageContext(page) {
 }
 
 // Get or create a session
-async function getOrCreateSession(sessionId, headless = true) {
+async function getOrCreateSession(sessionId, headless = true, scenarioInfo = null) {
   if (sessionId && persistentSessions.has(sessionId)) {
     return persistentSessions.get(sessionId);
   }
@@ -275,11 +385,21 @@ async function getOrCreateSession(sessionId, headless = true) {
     networkRequests: [],
     debugMode: false,
     consoleHistory: [],
-    watchedExpressions: new Map()
+    watchedExpressions: new Map(),
+    // Scenario-related metadata
+    scenarioId: scenarioInfo?.scenarioId || null,
+    role: scenarioInfo?.role || null,
+    label: scenarioInfo?.label || null
   };
   
   if (sessionId) {
     persistentSessions.set(sessionId, session);
+    
+    // If this session is part of a scenario, register it
+    if (scenarioInfo?.scenarioId && testScenarios.has(scenarioInfo.scenarioId)) {
+      const scenario = testScenarios.get(scenarioInfo.scenarioId);
+      scenario.addSession(sessionId, scenarioInfo.role, scenarioInfo.label);
+    }
   }
   
   return session;
@@ -671,6 +791,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: 'Enable debug mode to capture console logs, errors, and network activity (default: false)',
             default: false,
           },
+          scenarioId: {
+            type: 'string',
+            description: 'Test scenario ID to associate this session with (optional)',
+          },
+          role: {
+            type: 'string',
+            description: 'Role of this session (admin, participant, observer)',
+          },
+          label: {
+            type: 'string',
+            description: 'Label for this session (e.g., P1, P2, Admin1)',
+          },
         },
         required: [],
       },
@@ -694,8 +826,116 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'List all active browser sessions',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          scenarioId: {
+            type: 'string',
+            description: 'Filter sessions by scenario ID (optional)',
+          },
+          role: {
+            type: 'string',
+            description: 'Filter sessions by role (optional)',
+          },
+        },
         required: [],
+      },
+    },
+    {
+      name: 'create_test_scenario',
+      description: 'Create a new test scenario for multi-participant testing',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Name of the test scenario',
+          },
+          description: {
+            type: 'string',
+            description: 'Description of what this scenario tests',
+          },
+          experimentName: {
+            type: 'string',
+            description: 'Name of the experiment being tested',
+          },
+          testParameters: {
+            type: 'object',
+            description: 'Parameters for this test (e.g., condition, difficulty)',
+          },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Tags for categorizing this scenario',
+          },
+          initialState: {
+            type: 'object',
+            description: 'Initial custom state data',
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'list_test_scenarios',
+      description: 'List all active test scenarios',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tag: {
+            type: 'string',
+            description: 'Filter by tag (optional)',
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'end_test_scenario',
+      description: 'End a test scenario and close all associated sessions',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scenarioId: {
+            type: 'string',
+            description: 'Scenario ID to end',
+          },
+        },
+        required: ['scenarioId'],
+      },
+    },
+    {
+      name: 'get_test_scenario',
+      description: 'Get detailed information about a test scenario',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scenarioId: {
+            type: 'string',
+            description: 'Scenario ID to query',
+          },
+        },
+        required: ['scenarioId'],
+      },
+    },
+    {
+      name: 'update_scenario_state',
+      description: 'Update the state of a test scenario',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scenarioId: {
+            type: 'string',
+            description: 'Scenario ID to update',
+          },
+          phase: {
+            type: 'string',
+            description: 'New phase (created, running, completed, failed)',
+          },
+          customData: {
+            type: 'object',
+            description: 'Custom state data to merge',
+          },
+        },
+        required: ['scenarioId'],
       },
     },
     {
@@ -917,7 +1157,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'start_session') {
       const sessionId = generateSessionId();
       const headless = args.headless !== undefined ? args.headless : false; // Default to visible for sessions
-      const session = await getOrCreateSession(sessionId, headless);
+      
+      // Prepare scenario info if provided
+      const scenarioInfo = args.scenarioId ? {
+        scenarioId: args.scenarioId,
+        role: args.role || 'participant',
+        label: args.label || sessionId
+      } : null;
+      
+      const session = await getOrCreateSession(sessionId, headless, scenarioInfo);
       
       // Set screenshot recording preference
       session.recordScreenshots = args.recordScreenshots || false;
@@ -942,11 +1190,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
       
+      let responseText = `Started session: ${sessionId}\nBrowser is ${headless ? 'headless' : 'visible'}\nScreenshot recording: ${session.recordScreenshots ? 'ON' : 'OFF'}\nDebug mode: ${session.debugMode ? 'ON (capturing console, errors, network)' : 'OFF'}`;
+      
+      if (scenarioInfo) {
+        responseText += `\nScenario: ${scenarioInfo.scenarioId}\nRole: ${scenarioInfo.role}\nLabel: ${scenarioInfo.label}`;
+      }
+      
+      responseText += `\n${args.url ? `Navigated to: ${args.url}` : 'Ready for commands'}\n\nUse this sessionId with other tools to interact with this browser session.`;
+      
       return {
         content: [
           {
             type: 'text',
-            text: `Started session: ${sessionId}\nBrowser is ${headless ? 'headless' : 'visible'}\nScreenshot recording: ${session.recordScreenshots ? 'ON' : 'OFF'}\nDebug mode: ${session.debugMode ? 'ON (capturing console, errors, network)' : 'OFF'}\n${args.url ? `Navigated to: ${args.url}` : 'Ready for commands'}\n\nUse this sessionId with other tools to interact with this browser session.`,
+            text: responseText,
           },
         ],
       };
@@ -963,6 +1219,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+      
+      // Remove from scenario if part of one
+      if (session.scenarioId && testScenarios.has(session.scenarioId)) {
+        const scenario = testScenarios.get(session.scenarioId);
+        scenario.removeSession(args.sessionId);
       }
       
       await session.context.close();
@@ -982,10 +1244,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'list_sessions') {
       const sessions = [];
       for (const [id, session] of persistentSessions) {
+        // Apply filters if provided
+        if (args.scenarioId && session.scenarioId !== args.scenarioId) continue;
+        if (args.role && session.role !== args.role) continue;
+        
         try {
           const url = session.page.url();
           const title = await session.page.title();
-          sessions.push(`${id}: ${url} - "${title}"`);
+          let sessionInfo = `${id}: ${url} - "${title}"`;
+          
+          // Add scenario info if present
+          if (session.scenarioId) {
+            sessionInfo += ` [Scenario: ${session.scenarioId}, Role: ${session.role}, Label: ${session.label}]`;
+          }
+          
+          sessions.push(sessionInfo);
         } catch (e) {
           sessions.push(`${id}: (session error)`);
         }
@@ -1727,6 +2000,178 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+    }
+    
+    // Handle test scenario management tools
+    if (name === 'create_test_scenario') {
+      const scenarioId = generateScenarioId();
+      const scenario = new TestScenario(scenarioId, {
+        name: args.name,
+        description: args.description,
+        experimentName: args.experimentName,
+        testParameters: args.testParameters,
+        tags: args.tags,
+        initialState: args.initialState
+      });
+      
+      testScenarios.set(scenarioId, scenario);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Created test scenario: ${scenarioId}\nName: ${scenario.metadata.name}\n${scenario.metadata.description ? `Description: ${scenario.metadata.description}\n` : ''}${scenario.metadata.experimentName ? `Experiment: ${scenario.metadata.experimentName}\n` : ''}${scenario.metadata.tags?.length ? `Tags: ${scenario.metadata.tags.join(', ')}\n` : ''}\nUse this scenarioId when starting sessions to group them together.`,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'list_test_scenarios') {
+      const scenarios = [];
+      for (const [id, scenario] of testScenarios) {
+        // Apply tag filter if provided
+        if (args.tag && !scenario.metadata.tags?.includes(args.tag)) continue;
+        
+        scenarios.push(`${id}: ${scenario.metadata.name} (${scenario.sessions.size} sessions, phase: ${scenario.state.phase})`);
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: scenarios.length > 0 
+              ? `Active test scenarios:\n${scenarios.join('\n')}`
+              : 'No active test scenarios',
+          },
+        ],
+      };
+    }
+    
+    if (name === 'get_test_scenario') {
+      const scenario = testScenarios.get(args.scenarioId);
+      if (!scenario) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Scenario not found: ${args.scenarioId}`,
+            },
+          ],
+        };
+      }
+      
+      const summary = scenario.getSummary();
+      let responseText = `Test Scenario: ${summary.scenarioId}\n`;
+      responseText += `Name: ${summary.metadata.name}\n`;
+      responseText += `Created: ${summary.createdAt}\n`;
+      responseText += `Phase: ${summary.state.phase}\n`;
+      
+      if (summary.metadata.description) {
+        responseText += `Description: ${summary.metadata.description}\n`;
+      }
+      
+      if (summary.metadata.experimentName) {
+        responseText += `Experiment: ${summary.metadata.experimentName}\n`;
+      }
+      
+      if (summary.metadata.testParameters && Object.keys(summary.metadata.testParameters).length > 0) {
+        responseText += `Parameters: ${JSON.stringify(summary.metadata.testParameters, null, 2)}\n`;
+      }
+      
+      if (summary.state.customData && Object.keys(summary.state.customData).length > 0) {
+        responseText += `Custom State: ${JSON.stringify(summary.state.customData, null, 2)}\n`;
+      }
+      
+      responseText += `\nSessions (${summary.sessionCount}):\n`;
+      if (summary.sessions.length > 0) {
+        summary.sessions.forEach(s => {
+          responseText += `  - ${s.sessionId} [${s.label}]: Role=${s.role}, Status=${s.status}, Joined=${s.joinedAt}\n`;
+        });
+      } else {
+        responseText += `  No sessions attached\n`;
+      }
+      
+      responseText += `\nEvent History: ${summary.eventCount} events recorded`;
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'update_scenario_state') {
+      const scenario = testScenarios.get(args.scenarioId);
+      if (!scenario) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Scenario not found: ${args.scenarioId}`,
+            },
+          ],
+        };
+      }
+      
+      scenario.updateState({
+        phase: args.phase,
+        customData: args.customData
+      });
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Updated scenario ${args.scenarioId}\n${args.phase ? `Phase: ${args.phase}\n` : ''}${args.customData ? `Custom data updated: ${JSON.stringify(args.customData)}\n` : ''}`,
+          },
+        ],
+      };
+    }
+    
+    if (name === 'end_test_scenario') {
+      const scenario = testScenarios.get(args.scenarioId);
+      if (!scenario) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Scenario not found: ${args.scenarioId}`,
+            },
+          ],
+        };
+      }
+      
+      // Close all sessions associated with this scenario
+      const sessionIds = Array.from(scenario.sessions.keys());
+      let closedCount = 0;
+      
+      for (const sessionId of sessionIds) {
+        const session = persistentSessions.get(sessionId);
+        if (session) {
+          await session.context.close();
+          await session.browser.close();
+          persistentSessions.delete(sessionId);
+          closedCount++;
+        }
+      }
+      
+      // Update scenario state
+      scenario.updateState({ phase: 'completed' });
+      
+      // Remove scenario
+      testScenarios.delete(args.scenarioId);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Ended test scenario: ${args.scenarioId}\nClosed ${closedCount} sessions\nScenario data has been preserved for analysis`,
+          },
+        ],
+      };
     }
     
     // For other tools, check if sessionId is provided
