@@ -26,7 +26,16 @@ A Model Context Protocol (MCP) server that provides Playwright browser automatio
 - **get_page_context** - Get detailed page context including forms, buttons, and links
 - **get_screenshot_history** - Get screenshot history for a session
 
-### Debugging & Console Tools (NEW!)
+### Multi-Participant Test Scenarios (NEW!)
+
+- **create_test_scenario** - Create named test scenarios to group related sessions
+- **list_test_scenarios** - View all active test scenarios
+- **get_test_scenario** - Get detailed scenario information and session list
+- **update_scenario_state** - Track test phases and custom state data
+- **end_test_scenario** - Clean up scenario and close all associated sessions
+- **Enhanced sessions** - Sessions can have roles (admin/participant) and labels
+
+### Debugging & Console Tools
 
 - **console** - Interactive JavaScript console - execute commands in page context
 - **console_history** - Get console command history for the session
@@ -428,6 +437,163 @@ All tools now support:
 }
 // Returns all interactive elements on the page
 ```
+
+### Multi-Participant Test Scenarios (NEW!)
+
+Coordinate multiple browser sessions for testing experiments with multiple participants, different user roles, and complex interactions.
+
+#### Create a Test Scenario
+```javascript
+{
+  "tool": "create_test_scenario",
+  "arguments": {
+    "name": "Collaborative Task Test",
+    "description": "Testing 2 participants in a collaborative task",
+    "experimentName": "collab_study_v2",
+    "testParameters": {
+      "condition": "synchronous",
+      "difficulty": "medium"
+    },
+    "tags": ["collaboration", "multi-user"]
+  }
+}
+// Returns: scenarioId to group related sessions
+```
+
+#### Start Sessions with Roles and Labels
+```javascript
+// Admin session
+{
+  "tool": "start_session",
+  "arguments": {
+    "scenarioId": "scenario-123",  // Link to scenario
+    "role": "admin",               // Role: admin, participant, observer
+    "label": "Admin1",             // Friendly label
+    "headless": false,
+    "url": "https://experiment.com/admin"
+  }
+}
+
+// Participant sessions
+{
+  "tool": "start_session",
+  "arguments": {
+    "scenarioId": "scenario-123",
+    "role": "participant",
+    "label": "P1",
+    "headless": false,
+    "url": "https://experiment.com/join"
+  }
+}
+```
+
+#### List Sessions by Scenario or Role
+```javascript
+{
+  "tool": "list_sessions",
+  "arguments": {
+    "scenarioId": "scenario-123",  // Optional: filter by scenario
+    "role": "participant"           // Optional: filter by role
+  }
+}
+```
+
+#### List All Test Scenarios
+```javascript
+{
+  "tool": "list_test_scenarios",
+  "arguments": {}  // Optional: { "tag": "collaboration" } to filter
+}
+```
+
+#### Get Scenario Details
+```javascript
+{
+  "tool": "get_test_scenario",
+  "arguments": {
+    "scenarioId": "scenario-123"
+  }
+}
+// Returns scenario metadata, all sessions, and event history
+```
+
+#### Update Scenario State
+```javascript
+{
+  "tool": "update_scenario_state",
+  "arguments": {
+    "scenarioId": "scenario-123",
+    "phase": "running",  // created, running, completed, failed
+    "customData": {
+      "participantsReady": true,
+      "tasksCompleted": 0
+    }
+  }
+}
+```
+
+#### End Scenario and Clean Up All Sessions
+```javascript
+{
+  "tool": "end_test_scenario",
+  "arguments": {
+    "scenarioId": "scenario-123"
+  }
+}
+// Closes all browser sessions associated with the scenario
+```
+
+#### Complete Multi-Participant Example
+
+Testing multiple participants joining an experiment:
+
+```javascript
+// 1. Create scenario
+const scenario = create_test_scenario({
+  name: "Two-Player Game Test",
+  experimentName: "multiplayer_game_v1"
+});
+
+// 2. Start admin and create experiment
+const admin = start_session({
+  scenarioId: scenario.id,
+  role: "admin",
+  label: "Admin"
+});
+
+// 3. Start participant 1
+const p1 = start_session({
+  scenarioId: scenario.id,
+  role: "participant", 
+  label: "P1"
+});
+
+// 4. Start participant 2 with delay
+await new Promise(r => setTimeout(r, 3000));
+const p2 = start_session({
+  scenarioId: scenario.id,
+  role: "participant",
+  label: "P2"
+});
+
+// 5. Verify all connected
+check_element({
+  sessionId: admin.id,
+  selector: "#participant-count",
+  expectedText: "2"
+});
+
+// 6. Clean up everything
+end_test_scenario({ scenarioId: scenario.id });
+```
+
+#### Use Cases
+
+1. **Multiple Participants**: Test experiments requiring 2+ simultaneous users
+2. **Role-Based Testing**: Different views for admin vs participants
+3. **Parameter Changes**: Verify changes propagate to all participants
+4. **Dropout Recovery**: Test handling of participant disconnections
+5. **Synchronization**: Ensure all participants see consistent state
 
 ## Docker Deployment
 
